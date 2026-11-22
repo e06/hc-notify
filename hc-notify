@@ -488,7 +488,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.terminals:
-        parser.error("at least one terminal is required (or use --send)")
+        parser.print_help()
+        print(
+            "\nhc-notify: error: at least one terminal is required (or use --send)",
+            file=sys.stderr,
+        )
+        return 2
 
     maybe_spawn_background()
     args.message = load_template(args.message)
