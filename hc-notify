@@ -273,7 +273,7 @@ def match_target(terminal: dict, targets: set[str]) -> str | None:
 
 def maybe_spawn_background() -> None:
     """Unless --raw, re-launch this process inside a background hc terminal."""
-    if "--_spawned" in sys.argv[1:] or "--raw" in sys.argv[1:]:
+    if "--_spawned" in sys.argv[1:] or "--raw" in sys.argv[1:] or "--send" in sys.argv[1:]:
         return
     raw_args = sys.argv[1:]
     argv = [sys.executable, os.path.abspath(__file__)]
@@ -429,7 +429,14 @@ def build_parser() -> argparse.ArgumentParser:
             + "\n\n" + __doc__
         ),
     )
-    parser.add_argument("terminals", nargs="+", help="terminal addresses (t5) or names")
+    parser.add_argument(
+        "terminals", nargs="*",
+        help="terminal addresses (t5) or names; not needed with --send",
+    )
+    parser.add_argument(
+        "--send", action="store_true",
+        help="send a message directly instead of watching terminals",
+    )
     parser.add_argument(
         "-m", "--message", default=DEFAULT_SUCCESS_TEMPLATE,
         help="template for success, or a file containing it (exit_code 0)",
@@ -459,7 +466,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.send:
+        raw_args = list(argv) if argv is not None else sys.argv[1:]
+        if not any(
+            a in ("-m", "--message") or a.startswith("--message=")
+            for a in raw_args
+        ):
+            parser.error("-m/--message is required with --send")
+        zulip_cfg, raft_cfg = load_config(args.config)
+        message = load_template(args.message)
+        failures = notify(message, zulip_cfg, raft_cfg, verbose=args.verbose)
+        if failures:
+            print(
+                f"[hc-notify] {len(failures)} notification(s) failed",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
+    if not args.terminals:
+        parser.error("at least one terminal is required (or use --send)")
+
     maybe_spawn_background()
     args.message = load_template(args.message)
     args.error_message = load_template(args.error_message)

@@ -24,6 +24,8 @@ Keep it a single script with no third-party Python dependencies. `tomllib` is th
 - **`{output}` is lazy.** Only templates containing `{output}` call `hc read <address>` (last 100 lines), so successful runs do not pay the cost.
 - **Failures are aggregated.** Each failed channel is reported on stderr and the final exit code is 1 if any notification failed.
 
+- **Direct send.** `--send -m "..."` skips terminal watching entirely: it loads the config and calls `notify()` once, then exits. `-m` is required. It never self-backgrounds, and `-m` still accepts a file path via `load_template`.
+
 ## Templates
 
 `SafeFormatter` leaves unknown placeholders untouched instead of raising `KeyError`. Available variables are listed in `TEMPLATE_VARS` and in the README. Keep new variables in sync across the script, `--help` epilog, and README. `-m`/`-e` accept either an inline template or a path to an existing file (`load_template`); relative file paths are converted to absolute when self-backgrounding so the spawned process can still find them.

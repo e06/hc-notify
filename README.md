@@ -71,6 +71,10 @@ hc-notify t7 -e "job {address} FAILED:\n{output}"
 # Templates can come from files instead of inline strings
 hc-notify t5 -m ./success.tmpl -e ./error.tmpl
 
+# Send a message directly, without watching any terminal
+hc-notify --send -m "deployment finished"
+hc-notify --send -m ./message.tmpl --verbose
+
 # Bound the runtime, print message URLs, and run in the foreground
 hc-notify t5 --timeout 1h30m --verbose --raw
 ```
@@ -79,7 +83,8 @@ hc-notify t5 --timeout 1h30m --verbose --raw
 
 | Option | Meaning |
 | --- | --- |
-| `terminals` | One or more terminal addresses (`t5`) or names. Prefer addresses: names may collide. |
+| `terminals` | One or more terminal addresses (`t5`) or names. Prefer addresses: names may collide. Not needed with `--send`. |
+| `--send` | Send the `-m` message directly to both channels and exit; no terminal watching. Requires `-m`. |
 | `-m`, `--message` | Template for a successful finish (`exit_code` 0), or a path to a file containing it. |
 | `-e`, `--error-message` | Template for a failed finish, or a path to a file containing it. `{output}` triggers an `hc read`. |
 | `--config` | Config file path (default above). |
