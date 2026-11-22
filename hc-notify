@@ -271,8 +271,8 @@ def match_target(terminal: dict, targets: set[str]) -> str | None:
     return None
 
 
-def maybe_spawn_background() -> None:
-    """Unless --raw, re-launch this process inside a background hc terminal."""
+def maybe_spawn_background(terminal: str | None = None) -> None:
+    """Unless --raw/--send, re-launch this process inside a background hc terminal."""
     if "--_spawned" in sys.argv[1:] or "--raw" in sys.argv[1:] or "--send" in sys.argv[1:]:
         return
     raw_args = sys.argv[1:]
@@ -296,7 +296,11 @@ def maybe_spawn_background() -> None:
         argv.append(arg)
         index += 1
     argv.append("--_spawned")
-    command = ["hc", "run", "--bg", "--no-parent"] + argv
+    command = ["hc", "run", "--bg", "--no-parent"]
+    if terminal:
+        safe = re.sub(r"[^a-z0-9_-]", "-", terminal.lower())[:24]
+        command += ["--name", f"hc-wait-{safe}"]
+    command += argv
     print("[hc-notify] starting in background via hc run --bg", flush=True)
     result = subprocess.run(command, check=False)
     raise SystemExit(result.returncode)
@@ -495,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    maybe_spawn_background()
+    maybe_spawn_background(args.terminals[0] if args.terminals else None)
     args.message = load_template(args.message)
     args.error_message = load_template(args.error_message)
     zulip_cfg, raft_cfg = load_config(args.config)

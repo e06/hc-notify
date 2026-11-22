@@ -2,7 +2,7 @@
 
 Watch one or more [hc](https://github.com/) terminals and send a notification to **both Zulip and Raft** as soon as each terminal finishes.
 
-By default the watcher re-launches itself inside a background hc terminal (`hc run --bg`). Use `--raw` to run it in the foreground.
+By default the watcher re-launches itself inside a background hc terminal (`hc run --bg --no-parent --name hc-wait-<terminal>`). Use `--raw` to run it in the foreground.
 
 ## Requirements
 
