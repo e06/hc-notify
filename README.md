@@ -40,7 +40,7 @@ site = "https://iso.zulipchat.com"
 email = "seei-bot@iso.zulipchat.com"
 key = "<your-zulip-api-key>"
 channel = "so"
-topic = "hc-notify"
+topic = "ci"
 
 [raft]
 credential = "<your-sk_agent-credential>"
