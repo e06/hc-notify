@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""hc-notify - watch hc terminals and send notifications when they finish.
+
+A notification is sent to BOTH Zulip and Raft. Configuration lives in one
+TOML file (default: ~/.config/herdr-core/herdr-notify.toml).
+
+Examples:
+    hc-notify t5
+    hc-notify t5 t6 -m "task {name} done in {duration}"
+    hc-notify t7 -e "FAILED {address}: {reason}\\n{output}" --timeout 1h30m
+    hc-notify t5 --raw        # foreground; skip the hc run --bg wrapper
+    hc-notify t5 --verbose    # print the message URL returned by each channel
+
+Requires Python 3.11+ (tomllib) and the `hc` CLI.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import select
+import socket
+import string
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import datetime
+
+DEFAULT_CONFIG = os.path.expanduser("~/.config/herdr-core/herdr-notify.toml")
+SPAWN_ENV = "HERDR_NOTIFY_SPAWNED"
+
+DEFAULT_SUCCESS_TEMPLATE = (
+    "hc terminal {address} ({name}) finished: "
+    "reason={reason}, exit_code={exit_code}, duration={duration}"
+)
+DEFAULT_ERROR_TEMPLATE = (
+    "hc terminal {address} ({name}) FAILED: "
+    "reason={reason}, exit_code={exit_code}, duration={duration}\n{output}"
+)
+
+TEMPLATE_VARS = (
+    "address", "name", "cwd", "argv", "exit_code", "reason", "output",
+    "start_time", "end_time", "duration", "hostname",
+)
+
+
+def parse_duration(value: str) -> int:
+    """Parse 30s / 5m30s / 1h30m20s into seconds."""
+    match = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", value.strip())
+    if not match or not any(match.groups()):
+        raise ValueError(
+            f"invalid duration {value!r}; use forms like 30s, 5m30s, 1h30m20s"
+        )
+    hours, minutes, seconds = (int(x or 0) for x in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def format_time(ms: int | None) -> str:
+    if not ms:
+        return ""
+    return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_duration(ms: int | None) -> str:
+    if not ms or ms < 0:
+        return ""
+    total = int(ms / 1000)
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes}m{seconds}s"
+    if minutes:
+        return f"{minutes}m{seconds}s"
+    return f"{seconds}s"
+
+
+class SafeFormatter(string.Formatter):
+    """str.format that leaves unknown placeholders untouched instead of failing."""
+
+    def get_value(self, key, args, kwargs):
+        if key not in kwargs:
+            return "{" + str(key) + "}"
+        return kwargs[key]
+
+
+def render(template: str, context: dict) -> str:
+    return SafeFormatter().vformat(template, (), context)
+
+
+def read_terminal_output(address: str, max_lines: int = 100) -> str:
+    """Read a terminal's screen/history via `hc read` (used by {output})."""
+    try:
+        result = subprocess.run(
+            ["hc", "read", address],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        lines = result.stdout.strip().splitlines()
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        return "\n".join(lines) or "(no output)"
+    except Exception as exc:
+        return f"(could not read {address}: {exc})"
+
+
+def build_context(terminal: dict, need_output: bool) -> dict:
+    created = terminal.get("created_ms")
+    finished = terminal.get("finished_ms")
+    address = terminal.get("address", "")
+    return {
+        "address": address,
+        "name": terminal.get("name") or "",
+        "cwd": terminal.get("cwd") or "",
+        "argv": " ".join(terminal.get("argv") or []),
+        "exit_code": terminal.get("exit_code"),
+        "reason": terminal.get("reason") or "",
+        "output": read_terminal_output(address) if need_output else "",
+        "start_time": format_time(created),
+        "end_time": format_time(finished),
+        "duration": format_duration(finished - created) if created and finished else "",
+        "hostname": socket.gethostname(),
+    }
+
+
+def load_config(path: str) -> tuple[dict, dict]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"config not found: {path}\n"
+            "Copy config.example.toml to that path and fill in credentials."
+        )
+    with open(path, "rb") as handle:
+        cfg = tomllib.load(handle)
+
+    zulip = dict(cfg.get("zulip", {}))
+    raft = dict(cfg.get("raft", {}))
+
+    for env, key in (
+        ("ZULIP_SITE", "site"),
+        ("ZULIP_EMAIL", "email"),
+        ("ZULIP_API_KEY", "key"),
+        ("ZULIP_CHANNEL", "channel"),
+        ("ZULIP_TOPIC", "topic"),
+    ):
+        if env in os.environ:
+            zulip[key] = os.environ[env]
+    for env, key in (
+        ("RAFT_AGENT_CREDENTIAL", "credential"),
+        ("RAFT_SERVER_URL", "server_url"),
+        ("RAFT_CHANNEL", "channel"),
+    ):
+        if env in os.environ:
+            raft[key] = os.environ[env]
+
+    return zulip, raft
+
+
+def send_zulip(cfg: dict, message: str) -> object:
+    if not cfg.get("email") or not cfg.get("key"):
+        raise RuntimeError("zulip: email/key not configured")
+    site = (cfg.get("site") or "https://iso.zulipchat.com").rstrip("/")
+    payload = urllib.parse.urlencode(
+        {
+            "type": "stream",
+            "to": cfg.get("channel") or "so",
+            "topic": cfg.get("topic") or socket.gethostname(),
+            "content": message,
+        }
+    ).encode("utf-8")
+    token = base64.b64encode(
+        f"{cfg['email']}:{cfg['key']}".encode("utf-8")
+    ).decode("ascii")
+    request = urllib.request.Request(
+        f"{site}/api/v1/messages",
+        data=payload,
+        headers={
+            "Authorization": f"Basic {token}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        result = json.load(response)
+    if result.get("result") != "success":
+        raise RuntimeError(f"zulip: {result}")
+    return {"id": result.get("id"), "url": result.get("message_url")}
+
+
+def send_raft(cfg: dict, message: str) -> object:
+    credential = cfg.get("credential")
+    if not credential:
+        raise RuntimeError("raft: credential not configured")
+    base = (cfg.get("server_url") or "https://api.raft.build").rstrip("/")
+    body = json.dumps(
+        {
+            "target": cfg.get("channel") or "#general",
+            "content": message,
+            "idempotencyKey": str(uuid.uuid4()),
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base}/internal/agent-api/send",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {credential}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        result = json.load(response)
+    if result is None or (isinstance(result, dict) and result.get("ok") is False):
+        raise RuntimeError(f"raft: {result}")
+    url = None
+    sources = (result, result.get("data") if isinstance(result, dict) else None)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("message_url", "messageUrl", "url", "permalink"):
+            if source.get(key):
+                url = source[key]
+                break
+        if url:
+            break
+    return {"url": url}
+
+
+def notify(
+    message: str, zulip_cfg: dict, raft_cfg: dict, verbose: bool = False
+) -> list[str]:
+    """Send to both channels; one failure never blocks the other."""
+    failures: list[str] = []
+    for name, sender, cfg in (
+        ("zulip", send_zulip, zulip_cfg),
+        ("raft", send_raft, raft_cfg),
+    ):
+        try:
+            sent = sender(cfg, message)
+            url = sent.get("url") if isinstance(sent, dict) else None
+            if verbose and url:
+                print(f"[hc-notify] sent via {name}: {url}", flush=True)
+            else:
+                print(f"[hc-notify] sent via {name}", flush=True)
+        except Exception as exc:
+            detail = f"{name}: {exc}"
+            failures.append(detail)
+            print(f"[hc-notify] failed via {detail}", file=sys.stderr, flush=True)
+    return failures
+
+
+def match_target(terminal: dict, targets: set[str]) -> str | None:
+    address = terminal.get("address", "")
+    if address in targets:
+        return address
+    name = terminal.get("name")
+    if name and name in targets:
+        return name
+    return None
+
+
+def maybe_spawn_background() -> None:
+    """Unless --raw, re-launch this process inside a background hc terminal."""
+    if os.environ.get(SPAWN_ENV) or "--raw" in sys.argv[1:]:
+        return
+    env = os.environ.copy()
+    env[SPAWN_ENV] = "1"
+    argv = [sys.executable, os.path.abspath(__file__)] + sys.argv[1:]
+    command = ["hc", "run", "--bg", "--outlive-parent"] + argv
+    print("[hc-notify] starting in background via hc run --bg", flush=True)
+    result = subprocess.run(command, env=env, check=False)
+    raise SystemExit(result.returncode)
+
+
+def watch(args, zulip_cfg: dict, raft_cfg: dict) -> list[str]:
+    targets = set(args.terminals)
+    pending = set(targets)
+    known: dict[str, dict] = {}        # address -> last full terminal record
+    matched: dict[str, str] = {}       # target -> address
+    notified: dict[str, object] = {}   # address -> finished_ms (dedupe)
+    failures: list[str] = []
+    deadline = (
+        time.time() + parse_duration(args.timeout) if args.timeout else None
+    )
+
+    process = subprocess.Popen(
+        ["hc", "events", "--json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+    print(f"[hc-notify] watching: {', '.join(sorted(targets))}", flush=True)
+
+    def handle(terminal: dict, baseline: bool) -> None:
+        address = terminal.get("address", "")
+        if not address:
+            return
+        known[address] = terminal
+
+        key = next(
+            (target for target, addr in matched.items() if addr == address),
+            None,
+        )
+        if key is None:
+            key = match_target(terminal, targets)
+            if key:
+                matched[key] = address
+        if key is None or key not in pending:
+            return
+        if terminal.get("state") != "finished":
+            return
+
+        finished = terminal.get("finished_ms")
+        if baseline:
+            # Already finished at startup: record but never notify.
+            notified[address] = finished
+            pending.discard(key)
+            return
+        if not finished or notified.get(address) == finished:
+            return
+
+        notified[address] = finished
+        pending.discard(key)
+        is_error = (
+            terminal.get("exit_code") not in (None, 0)
+            or terminal.get("reason") in ("error", "killed", "signal")
+        )
+        template = args.error_message if is_error else args.message
+        context = build_context(terminal, need_output=("{output}" in template))
+        message = render(template, context)
+        print(
+            f"[hc-notify] {key} finished: "
+            f"exit={terminal.get('exit_code')}, reason={terminal.get('reason')}",
+            flush=True,
+        )
+        failures.extend(notify(message, zulip_cfg, raft_cfg, verbose=args.verbose))
+
+    try:
+        while pending:
+            if deadline and time.time() >= deadline:
+                print(f"[hc-notify] timed out after {args.timeout}", file=sys.stderr, flush=True)
+                break
+            ready, _, _ = select.select([process.stdout], [], [], 1.0)
+            if not ready:
+                if process.poll() is not None:
+                    print("[hc-notify] hc events stream ended", file=sys.stderr, flush=True)
+                    break
+                continue
+            line = process.stdout.readline()
+            if not line:
+                break
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if "terminals" in event:
+                # First line: full snapshot of every terminal.
+                for terminal in event["terminals"]:
+                    handle(terminal, baseline=True)
+                continue
+
+            if event.get("jsonrpc") == "2.0" and event.get("method") == "event":
+                # Subsequent lines: JSON-RPC incremental events. `finished`
+                # carries only partial data, so merge it into the cached record.
+                params = event.get("params", {})
+                kind = params.get("type")
+                address = params.get("terminal", "")
+                if not address:
+                    continue
+                if kind == "created":
+                    handle(params.get("data", {}), baseline=False)
+                elif kind == "finished":
+                    merged = dict(known.get(address, {"address": address}))
+                    merged.update(params.get("data", {}))
+                    merged["state"] = "finished"
+                    handle(merged, baseline=False)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    if not pending:
+        print("[hc-notify] all targets finished", flush=True)
+    return failures
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="hc-notify",
+        description="Watch hc terminals and notify Zulip + Raft when they finish.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "template variables: " + ", ".join("{" + v + "}" for v in TEMPLATE_VARS)
+            + "\n\n" + __doc__
+        ),
+    )
+    parser.add_argument("terminals", nargs="+", help="terminal addresses (t5) or names")
+    parser.add_argument(
+        "-m", "--message", default=DEFAULT_SUCCESS_TEMPLATE,
+        help="template for a successful finish (exit_code 0)",
+    )
+    parser.add_argument(
+        "-e", "--error-message", default=DEFAULT_ERROR_TEMPLATE,
+        help="template for a failed finish; {output} reads `hc read`",
+    )
+    parser.add_argument(
+        "--config", default=DEFAULT_CONFIG,
+        help=f"config file (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument(
+        "--timeout", metavar="DURATION",
+        help="max runtime, e.g. 30s, 5m30s, 1h30m20s",
+    )
+    parser.add_argument(
+        "--raw", action="store_true",
+        help="run in the foreground; do not wrap with `hc run --bg`",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="print the message URL returned by each channel",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    maybe_spawn_background()
+    zulip_cfg, raft_cfg = load_config(args.config)
+    failures = watch(args, zulip_cfg, raft_cfg)
+    if failures:
+        print(
+            f"[hc-notify] {len(failures)} notification(s) failed",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

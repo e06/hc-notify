@@ -1,0 +1,16 @@
+# Copy to ~/.config/herdr-core/herdr-notify.toml and fill in the credentials.
+# Environment variables override the values below:
+#   ZULIP_SITE, ZULIP_EMAIL, ZULIP_API_KEY, ZULIP_CHANNEL, ZULIP_TOPIC
+#   RAFT_AGENT_CREDENTIAL, RAFT_SERVER_URL, RAFT_CHANNEL
+
+[zulip]
+site = "https://iso.zulipchat.com"
+email = "seei-bot@iso.zulipchat.com"
+key = "<your-zulip-api-key>"
+channel = "so"
+topic = "hc-notify"
+
+[raft]
+credential = "<your-sk_agent-credential>"
+server_url = "https://api.raft.build"
+channel = "#general"
