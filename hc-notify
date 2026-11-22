@@ -34,8 +34,6 @@ import uuid
 from datetime import datetime
 
 DEFAULT_CONFIG = os.path.expanduser("~/.config/herdr-core/herdr-notify.toml")
-SPAWN_ENV = "HERDR_NOTIFY_SPAWNED"
-
 DEFAULT_SUCCESS_TEMPLATE = (
     "hc terminal {address} ({name}) finished: "
     "reason={reason}, exit_code={exit_code}, duration={duration}"
@@ -275,10 +273,8 @@ def match_target(terminal: dict, targets: set[str]) -> str | None:
 
 def maybe_spawn_background() -> None:
     """Unless --raw, re-launch this process inside a background hc terminal."""
-    if os.environ.get(SPAWN_ENV) or "--raw" in sys.argv[1:]:
+    if "--_spawned" in sys.argv[1:] or "--raw" in sys.argv[1:]:
         return
-    env = os.environ.copy()
-    env[SPAWN_ENV] = "1"
     raw_args = sys.argv[1:]
     argv = [sys.executable, os.path.abspath(__file__)]
     template_flags = ("-m", "--message", "-e", "--error-message")
@@ -299,9 +295,10 @@ def maybe_spawn_background() -> None:
             continue
         argv.append(arg)
         index += 1
+    argv.append("--_spawned")
     command = ["hc", "run", "--bg", "--outlive-parent"] + argv
     print("[hc-notify] starting in background via hc run --bg", flush=True)
-    result = subprocess.run(command, env=env, check=False)
+    result = subprocess.run(command, check=False)
     raise SystemExit(result.returncode)
 
 
@@ -457,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose", action="store_true",
         help="print the message URL returned by each channel",
     )
+    parser.add_argument("--_spawned", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
