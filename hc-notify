@@ -296,7 +296,7 @@ def maybe_spawn_background() -> None:
         argv.append(arg)
         index += 1
     argv.append("--_spawned")
-    command = ["hc", "run", "--bg", "--outlive-parent"] + argv
+    command = ["hc", "run", "--bg", "--no-parent"] + argv
     print("[hc-notify] starting in background via hc run --bg", flush=True)
     result = subprocess.run(command, check=False)
     raise SystemExit(result.returncode)
