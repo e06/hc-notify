@@ -68,6 +68,9 @@ hc-notify t5 -m "job {name} finished in {duration} (exit {exit_code})"
 # Custom error template; {output} is filled from `hc read <terminal>`
 hc-notify t7 -e "job {address} FAILED:\n{output}"
 
+# Templates can come from files instead of inline strings
+hc-notify t5 -m ./success.tmpl -e ./error.tmpl
+
 # Bound the runtime, print message URLs, and run in the foreground
 hc-notify t5 --timeout 1h30m --verbose --raw
 ```
@@ -77,8 +80,8 @@ hc-notify t5 --timeout 1h30m --verbose --raw
 | Option | Meaning |
 | --- | --- |
 | `terminals` | One or more terminal addresses (`t5`) or names. Prefer addresses: names may collide. |
-| `-m`, `--message` | Template for a successful finish (`exit_code` 0). |
-| `-e`, `--error-message` | Template for a failed finish. `{output}` triggers an `hc read`. |
+| `-m`, `--message` | Template for a successful finish (`exit_code` 0), or a path to a file containing it. |
+| `-e`, `--error-message` | Template for a failed finish, or a path to a file containing it. `{output}` triggers an `hc read`. |
 | `--config` | Config file path (default above). |
 | `--timeout` | Max runtime: `30s`, `5m30s`, `1h30m20s`. On timeout the watcher exits. |
 | `--raw` | Run in the foreground instead of `hc run --bg`. |

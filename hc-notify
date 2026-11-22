@@ -81,6 +81,14 @@ def format_duration(ms: int | None) -> str:
     return f"{seconds}s"
 
 
+def load_template(value: str) -> str:
+    """If `value` names an existing file, use its contents as the template."""
+    if os.path.isfile(value):
+        with open(value, "r", encoding="utf-8") as handle:
+            return handle.read().rstrip("\n")
+    return value
+
+
 class SafeFormatter(string.Formatter):
     """str.format that leaves unknown placeholders untouched instead of failing."""
 
@@ -271,7 +279,26 @@ def maybe_spawn_background() -> None:
         return
     env = os.environ.copy()
     env[SPAWN_ENV] = "1"
-    argv = [sys.executable, os.path.abspath(__file__)] + sys.argv[1:]
+    raw_args = sys.argv[1:]
+    argv = [sys.executable, os.path.abspath(__file__)]
+    template_flags = ("-m", "--message", "-e", "--error-message")
+    index = 0
+    while index < len(raw_args):
+        arg = raw_args[index]
+        if arg in template_flags and index + 1 < len(raw_args):
+            value = raw_args[index + 1]
+            argv.append(arg)
+            argv.append(os.path.abspath(value) if os.path.isfile(value) else value)
+            index += 2
+            continue
+        if arg.startswith(("--message=", "--error-message=")):
+            flag, value = arg.split("=", 1)
+            path = os.path.abspath(value) if os.path.isfile(value) else value
+            argv.append(flag + "=" + path)
+            index += 1
+            continue
+        argv.append(arg)
+        index += 1
     command = ["hc", "run", "--bg", "--outlive-parent"] + argv
     print("[hc-notify] starting in background via hc run --bg", flush=True)
     result = subprocess.run(command, env=env, check=False)
@@ -408,11 +435,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("terminals", nargs="+", help="terminal addresses (t5) or names")
     parser.add_argument(
         "-m", "--message", default=DEFAULT_SUCCESS_TEMPLATE,
-        help="template for a successful finish (exit_code 0)",
+        help="template for success, or a file containing it (exit_code 0)",
     )
     parser.add_argument(
         "-e", "--error-message", default=DEFAULT_ERROR_TEMPLATE,
-        help="template for a failed finish; {output} reads `hc read`",
+        help="template for failure, or a file containing it; {output} reads `hc read`",
     )
     parser.add_argument(
         "--config", default=DEFAULT_CONFIG,
@@ -436,6 +463,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     maybe_spawn_background()
+    args.message = load_template(args.message)
+    args.error_message = load_template(args.error_message)
     zulip_cfg, raft_cfg = load_config(args.config)
     failures = watch(args, zulip_cfg, raft_cfg)
     if failures:

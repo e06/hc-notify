@@ -26,7 +26,7 @@ Keep it a single script with no third-party Python dependencies. `tomllib` is th
 
 ## Templates
 
-`SafeFormatter` leaves unknown placeholders untouched instead of raising `KeyError`. Available variables are listed in `TEMPLATE_VARS` and in the README. Keep new variables in sync across the script, `--help` epilog, and README.
+`SafeFormatter` leaves unknown placeholders untouched instead of raising `KeyError`. Available variables are listed in `TEMPLATE_VARS` and in the README. Keep new variables in sync across the script, `--help` epilog, and README. `-m`/`-e` accept either an inline template or a path to an existing file (`load_template`); relative file paths are converted to absolute when self-backgrounding so the spawned process can still find them.
 
 ## Making changes
 
