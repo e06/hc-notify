@@ -36,11 +36,11 @@ from datetime import datetime
 DEFAULT_CONFIG = os.path.expanduser("~/.config/herdr-core/herdr-notify.toml")
 DEFAULT_SUCCESS_TEMPLATE = (
     "hc terminal {address} ({name}) finished: "
-    "reason={reason}, exit_code={exit_code}, duration={duration}"
+    "cmd={argv}, reason={reason}, exit_code={exit_code}, duration={duration}"
 )
 DEFAULT_ERROR_TEMPLATE = (
     "hc terminal {address} ({name}) FAILED: "
-    "reason={reason}, exit_code={exit_code}, duration={duration}\n{output}"
+    "cmd={argv}, reason={reason}, exit_code={exit_code}, duration={duration}\n{output}"
 )
 
 TEMPLATE_VARS = (
